@@ -1,0 +1,123 @@
+pipeline {
+    agent any
+
+    environment {
+        // Environment variables used throughout the pipeline
+        EC2_INSTANCE = 'ec2-000-000-000-000.compute-2.amazonaws.com' // Address of the EC2 instance
+        REMOTE_DIR = '/home/ubuntu/bitbucket/dev' // Remote directory on the EC2 instance
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                script {
+                    // Checkout code from the specified Git repository using the 'dev-01' branch and provided credentials
+                    git branch: 'dev-01', credentialsId: 'a1b2c3d4-e5f6-7890-1234-567890abcdef', url: 'https://github.com/octocat/Hello-World.git'
+                }
+            }
+        }
+
+        stage('Connect to Server and Change Directory') {
+            steps {
+                script {
+                    // Use sshagent to provide SSH credentials and run commands on the EC2 instance
+                    sshagent(['b0c1d2e3-f4g5-67h8-90i1-j2k3l4m5n6o7']) {
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd /home/ubuntu/bitbucket/dev/containerization-nextcx && pwd && ls -ltr && cat repo.txt'"
+                    }
+                }
+            }
+        }
+
+        stage('Read repo.txt and Clone Git Repositories') {
+            steps {
+                script {
+                    sshagent(['b0c1d2e3-f4g5-67h8-90i1-j2k3l4m5n6o7']) {
+                        // Read the list of repositories from repo.txt
+                        def repos = sh(script: "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd /home/ubuntu/bitbucket/dev/containerization-nextcx && cat repo.txt'", returnStdout: true).trim().split('\n')
+
+                        repos.each { repo ->
+                            def destinationDir = "${REMOTE_DIR}/${repo}"
+
+                            // Check if the repository directory exists on the EC2 instance
+                            def directoryExists = sh(script: "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} '[ -d \"${destinationDir}\" ] && echo true || echo false'", returnStdout: true).trim()
+
+                            if (directoryExists == 'true') {
+                                // Pull the latest changes if the directory exists
+                                sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd ${destinationDir} && git pull'"
+                            } else {
+                                // Clone the repository if the directory does not exist
+                                sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'mkdir -p ${REMOTE_DIR} && cd ${REMOTE_DIR} && git clone git@bitbucket.org:dosapati/${repo}.git'"
+
+                                def newProjectName = "dev-${repo}Pipeline"
+
+                                // Create a new Jenkins pipeline project if it doesn't already exist
+                                if (jenkins.model.Jenkins.instance.getItem(newProjectName) == null) {
+                                    def newProject = jenkins.model.Jenkins.instance.createProject(org.jenkinsci.plugins.workflow.job.WorkflowJob, newProjectName)
+
+                                    def pipelineScript = """
+node {
+    stage('Git Checkout') {
+        // Checkout the code for the new repository
+        git branch: 'dev-01', credentialsId: 'a1b2c3d4-e5f6-7890-1234-567890abcdef', url: 'https://github.com/octocat/${repo}.git'
+    }
+    stage('Deploy to Dev-01') {
+        sshagent(['b0c1d2e3-f4g5-67h8-90i1-j2k3l4m5n6o7']) {
+            // Deploy the code by running a shell script on the EC2 instance
+            sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd /home/ubuntu/bitbucket/dev && bash dev-${repo}.sh'"
+        }
+    }
+    stage('sending a mail') {
+        // Send an email notification after deployment
+        mail bcc: '', body: 'Deployment is done, please check the changes', cc: '', from: '', replyTo: '', subject: 'stage deployment for dev-${repo}', to: 'randomuser@example.com'
+    }
+}
+                                    """
+
+                                    // Set the pipeline script for the new project
+                                    newProject.setDefinition(new org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition(pipelineScript, true))
+
+                                    // Add a Poll SCM trigger with a cron schedule
+                                    newProject.addTrigger(new hudson.triggers.SCMTrigger("* * * * *"))
+                                    newProject.save()
+                                } else {
+                                    // Output message if the project already exists
+                                    echo "Project ${newProjectName} already exists. Skipping creation."
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Run Additional Scripts') {
+            steps {
+                script {
+                    sshagent(['b0c1d2e3-f4g5-67h8-90i1-j2k3l4m5n6o7']) {
+                        def remoteDir = '/home/ubuntu/bitbucket/dev' // Remote directory on the EC2 instance
+                        // Create the remote directory if it doesn't exist and list its contents
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'mkdir -p ${remoteDir} && cd ${remoteDir} && pwd && ls -ltr'"
+                        // Remove the config.txt file if it exists
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'rm -f ${remoteDir}/config.txt'"
+                        // Run additional scripts and ignore errors
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd ${remoteDir} && ./port_number_script.sh || true'"
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd ${remoteDir} && ./base_script.sh || true'"
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd ${remoteDir} && ./docker_script.sh || true'"
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd ${remoteDir} && ./nginx_script.sh || true'"
+                    }
+                }
+            }
+        }
+
+        stage('List files after cloning') {
+            steps {
+                script {
+                    sshagent(['b0c1d2e3-f4g5-67h8-90i1-j2k3l4m5n6o7']) {
+                        // List files and display config.txt after cloning operations
+                        sh "ssh -o StrictHostKeyChecking=no ubuntu@${EC2_INSTANCE} 'cd ${REMOTE_DIR} && ls -ltr && cat config.txt'"
+                    }
+                }
+            }
+        }
+    }
+}
